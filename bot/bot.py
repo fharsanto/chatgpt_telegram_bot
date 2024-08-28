@@ -23,7 +23,8 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     AIORateLimiter,
-    filters
+    filters,
+    ContextTypes
 )
 from telegram.constants import ParseMode, ChatAction
 
@@ -92,14 +93,14 @@ async def register_user_if_not_exists(update: Update, context: CallbackContext, 
 
     # back compatibility for n_used_tokens field
     n_used_tokens = db.get_user_attribute(user.id, "n_used_tokens")
-    if isinstance(n_used_tokens, int) or isinstance(n_used_tokens, float):  # old format
+    if n_used_tokens is None or isinstance(eval(n_used_tokens), (int, float)):  # old format
         new_n_used_tokens = {
             "gpt-3.5-turbo": {
                 "n_input_tokens": 0,
-                "n_output_tokens": n_used_tokens
+                "n_output_tokens": int(n_used_tokens) if n_used_tokens else 0
             }
         }
-        db.set_user_attribute(user.id, "n_used_tokens", new_n_used_tokens)
+        db.set_user_attribute(user.id, "n_used_tokens", str(new_n_used_tokens))
 
     # voice message transcription
     if db.get_user_attribute(user.id, "n_transcribed_seconds") is None:
@@ -323,7 +324,8 @@ async def _vision_message_handle_fn(
         raise
 
     except Exception as e:
-        error_text = f"Something went wrong during completion. Reason: {e}"
+        stack_trace = traceback.format_exc()
+        error_text = f"Something went wrong during completion. Reason: {e}\nStack Trace:\n{stack_trace}"
         logger.error(error_text)
         await update.message.reply_text(error_text)
         return
@@ -362,13 +364,20 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
 
     current_model = db.get_user_attribute(user_id, "current_model")
 
-    async def message_handle_fn():
+    async def message_handle_fn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # new dialog timeout
         if use_new_dialog_timeout:
-            if (datetime.now() - db.get_user_attribute(user_id, "last_interaction")).seconds > config.new_dialog_timeout and len(db.get_dialog_messages(user_id)) > 0:
+            user_id = update.effective_user.id
+            last_interaction = db.get_user_attribute(user_id, "last_interaction")
+            
+            # Konversi last_interaction dari string ke datetime
+            if isinstance(last_interaction, str):
+                last_interaction = datetime.fromisoformat(last_interaction)
+            
+            if (datetime.now() - last_interaction).seconds > config.new_dialog_timeout and len(db.get_dialog_messages(user_id)) > 0:
                 db.start_new_dialog(user_id)
                 await update.message.reply_text(f"Starting new dialog due to timeout (<b>{config.chat_modes[chat_mode]['name']}</b> mode) ✅", parse_mode=ParseMode.HTML)
-        db.set_user_attribute(user_id, "last_interaction", datetime.now())
+        db.set_user_attribute(user_id, "last_interaction", datetime.now().isoformat())
 
         # in case of CancelledError
         n_input_tokens, n_output_tokens = 0, 0
@@ -385,6 +394,16 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
                  return
 
             dialog_messages = db.get_dialog_messages(user_id, dialog_id=None)
+            
+            # Tambahkan pengecekan dan konversi format pesan dialog
+            dialog_messages = [
+                {
+                    "role": "user" if "user" in msg else "assistant",
+                    "content": msg.get("user") or msg.get("bot") or msg.get("content", "")
+                }
+                for msg in dialog_messages
+            ]
+            
             parse_mode = {
                 "html": ParseMode.HTML,
                 "markdown": ParseMode.MARKDOWN
@@ -429,8 +448,10 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
                 prev_answer = answer
             
             # update user data
-            new_dialog_message = {"user": [{"type": "text", "text": _message}], "bot": answer, "date": datetime.now()}
-
+            new_dialog_message = {
+                "role": "user",
+                "content": _message
+            }
             db.set_dialog_messages(
                 user_id,
                 db.get_dialog_messages(user_id, dialog_id=None) + [new_dialog_message],
@@ -445,7 +466,8 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
             raise
 
         except Exception as e:
-            error_text = f"Something went wrong during completion. Reason: {e}"
+            stack_trace = traceback.format_exc()
+            error_text = f"Something went wrong during completion. Reason: {e}\nStack Trace:\n{stack_trace}"
             logger.error(error_text)
             await update.message.reply_text(error_text)
             return
@@ -472,7 +494,7 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
             )
         else:
             task = asyncio.create_task(
-                message_handle_fn()
+                message_handle_fn(update, context)
             )            
 
         user_tasks[user_id] = task
@@ -744,6 +766,7 @@ async def show_balance_handle(update: Update, context: CallbackContext):
     total_n_used_tokens = 0
 
     n_used_tokens_dict = db.get_user_attribute(user_id, "n_used_tokens")
+    n_used_tokens_dict = eval(n_used_tokens_dict) if isinstance(n_used_tokens_dict, str) else {}
     n_generated_images = db.get_user_attribute(user_id, "n_generated_images")
     n_transcribed_seconds = db.get_user_attribute(user_id, "n_transcribed_seconds")
 
@@ -786,7 +809,7 @@ async def edited_message_handle(update: Update, context: CallbackContext):
         await update.edited_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
-async def error_handle(update: Update, context: CallbackContext) -> None:
+async def error_handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
 
     try:
