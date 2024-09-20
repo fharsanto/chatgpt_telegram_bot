@@ -336,6 +336,30 @@ async def unsupport_message_handle(update: Update, context: CallbackContext, mes
     await update.message.reply_text(error_text)
     return
 
+SOURCE_CODE_EXTENSIONS = {'.txt', '.csv',  '.json', '.py', '.java', '.go', '.php', '.js', '.cpp', '.c', '.cs', '.rb', '.ts', '.swift'}
+
+def attachment_check(update: Update, context: CallbackContext):
+    if update.message.effective_attachment:
+        attachment = update.message.effective_attachment[-1]
+        if hasattr(attachment, 'file_name'):
+            file_name = attachment.file_name
+            file_extension = file_name.split('.')[-1] if '.' in file_name else ''
+            
+            # Check if the file extension matches any source code extensions
+            if f".{file_extension}" in SOURCE_CODE_EXTENSIONS:
+                return [True, ""]
+            return [False, f"The attached file '{file_name}' is not a source code file."]
+    return [False, "The attached file is not a document."]
+
+
+async def attachment_message_handle(update: Update, context: CallbackContext, message=None):
+    status = attachment_check(update=update, context=context)
+    if not status[0]:
+        await unsupport_message_handle(update=update, context=context, message=message)
+        return
+    await message_handle(update=update, context=context)
+
+
 async def message_handle(update: Update, context: CallbackContext, message=None, use_new_dialog_timeout=True):
     # check if bot was mentioned (for group chats)
     if not await is_bot_mentioned(update, context):
@@ -872,7 +896,7 @@ def run_bot() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & user_filter, message_handle))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND & user_filter, message_handle))
     application.add_handler(MessageHandler(filters.VIDEO & ~filters.COMMAND & user_filter, unsupport_message_handle))
-    application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND & user_filter, unsupport_message_handle))
+    application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND & user_filter, attachment_message_handle))
     application.add_handler(CommandHandler("retry", retry_handle, filters=user_filter))
     application.add_handler(CommandHandler("new", new_dialog_handle, filters=user_filter))
     application.add_handler(CommandHandler("cancel", cancel_handle, filters=user_filter))

@@ -36,6 +36,10 @@ class OpenAIService(AIService):
         openai.api_key = config.openai_api_key
         if config.openai_api_base:
             openai.api_base = config.openai_api_base
+        self.buffer = None
+
+    def set_buffer(self, buffer: BytesIO):
+        self.buffer = buffer
 
     async def send_message(self, message: str, dialog_messages: List[dict], chat_mode: str) -> Tuple[str, Tuple[int, int], int]:
         messages = self._generate_prompt_messages(message, dialog_messages, chat_mode)
@@ -138,6 +142,10 @@ class ClaudeService(AIService):
     def __init__(self, model="claude-3-sonnet-20240229"):
         self.model = model
         self.client = anthropic.AsyncAnthropic(api_key=config.anthropic_api_key)
+        self.buffer = None
+
+    def set_buffer(self, buffer: BytesIO):
+        self.buffer = buffer
 
     async def send_message(self, message: str, dialog_messages: List[dict], chat_mode: str) -> Tuple[str, Tuple[int, int], int]:
         messages = self._generate_prompt_messages(message, dialog_messages, chat_mode)
@@ -208,6 +216,10 @@ class ClaudeService(AIService):
         else:
             messages.append({"role": "user", "content": message})
 
+        if self.buffer:
+            content = self.buffer.getvalue().decode('utf-8')
+            message.append(anthropic.MessageContent(type="text", text=content))
+
         return messages
 
 class AIServiceAdapter:
@@ -218,6 +230,9 @@ class AIServiceAdapter:
             self.service = ClaudeService(model)
         else:
             raise ValueError(f"Unknown service: {service}")
+        
+    def set_buffer(self, buffer: BytesIO):
+        self.service.set_buffer(buffer)
 
     async def send_message(self, message: str, dialog_messages: List[dict], chat_mode: str) -> Tuple[str, Tuple[int, int], int]:
         return await self.service.send_message(message, dialog_messages, chat_mode)
