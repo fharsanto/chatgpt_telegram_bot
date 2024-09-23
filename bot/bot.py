@@ -31,7 +31,7 @@ from telegram.constants import ParseMode, ChatAction
 import config
 import database
 import openai_utils
-
+import ai
 import base64
 
 # setup
@@ -339,26 +339,49 @@ async def unsupport_message_handle(update: Update, context: CallbackContext, mes
 SOURCE_CODE_EXTENSIONS = {'.txt', '.csv',  '.json', '.py', '.java', '.go', '.php', '.js', '.cpp', '.c', '.cs', '.rb', '.ts', '.swift'}
 
 def attachment_check(update: Update, context: CallbackContext):
-    if update.message.effective_attachment:
-        attachment = update.message.effective_attachment[-1]
-        if hasattr(attachment, 'file_name'):
-            file_name = attachment.file_name
-            file_extension = file_name.split('.')[-1] if '.' in file_name else ''
-            
-            # Check if the file extension matches any source code extensions
-            if f".{file_extension}" in SOURCE_CODE_EXTENSIONS:
-                return [True, ""]
-            return [False, f"The attached file '{file_name}' is not a source code file."]
-    return [False, "The attached file is not a document."]
+    if update.message.document:
+        file_name = update.message.document.file_name
+        file_size = update.message.document.file_size
+        mime_type = update.message.document.mime_type
+
+        # Log the file details
+        logger.info(f"Received document: {file_name}, size: {file_size} bytes, type: {mime_type}")
+
+        file_extension = file_name.split('.')[-1] if '.' in file_name else ''
+        
+        # Check if the file extension matches any source code extensions
+        if f".{file_extension}" in SOURCE_CODE_EXTENSIONS:
+            return [True, update.message.caption]
+        return [False, f"The attached file '{file_name}' is not a source code file."]
+    return [False, "The attached file is not a document or is not supported."]
 
 
 async def attachment_message_handle(update: Update, context: CallbackContext, message=None):
-    status = attachment_check(update=update, context=context)
-    if not status[0]:
-        await unsupport_message_handle(update=update, context=context, message=message)
-        return
-    await message_handle(update=update, context=context)
+    try:
+        status = attachment_check(update=update, context=context)
+        if not status[0]:
+            await unsupport_message_handle(update=update, context=context, message=status[1])
+            return
+        await message_handle(update=update, context=context, message=status[1])
+    except Exception as e:
+        stack_trace = traceback.format_exc()
+        logger.error(f"Error in attachment_message_handle: {str(e)}\nStack Trace:\n{stack_trace}")
+        await update.message.reply_text("Sorry, there was an error processing your attachment. Please try again or contact support if the problem persists.")
 
+async def attachment_get(update: Update, context: CallbackContext):
+    if update.message.document:
+        doc = update.message.document
+        doc_file = await context.bot.get_file(doc.file_id)
+
+        # store file in memory, not on disk
+        buf = io.BytesIO()
+        await doc_file.download_to_memory(buf)
+        buf.seek(0) 
+        return buf
+    return False
+
+def ai_engine(service: str = "claude", model: str = "claude-3-sonnet-20240229"):
+    return ai.AIFactory.create(service, model)
 
 async def message_handle(update: Update, context: CallbackContext, message=None, use_new_dialog_timeout=True):
     # check if bot was mentioned (for group chats)
@@ -427,13 +450,17 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
                 }
                 for msg in dialog_messages
             ]
-            
+
             parse_mode = {
                 "html": ParseMode.HTML,
                 "markdown": ParseMode.MARKDOWN
             }[config.chat_modes[chat_mode]["parse_mode"]]
 
-            chatgpt_instance = openai_utils.ChatGPT(model=current_model)
+            # chatgpt_instance = openai_utils.ChatGPT(model=current_model)
+            chatgpt_instance = ai_engine() #"openai", "gpt-4o-mini")
+            chatgpt_instance.set_buffer(await attachment_get(update, context))
+
+            n_first_dialog_messages_removed = 0
             if config.enable_message_streaming:
                 gen = chatgpt_instance.send_message_stream(_message, dialog_messages=dialog_messages, chat_mode=chat_mode)
             else:
